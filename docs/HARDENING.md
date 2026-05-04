@@ -472,3 +472,63 @@ Governed Swarm Integration — per-call forensic granularity and offline integri
 - Per-call receipt tests: 17 tests
 - Offline verification tests: 10 tests
 - **Total: 290 tests, all passing**
+
+## Known Limitations (v2 scaffolding)
+
+The following components are functionally present but pending production
+hardening. They are documented here so operators can plan around them.
+
+### Quarantine state is in-memory only
+
+Location: `apps/api/app/governance/quarantine.py`
+
+The `QuarantinePostureManager` holds quarantine tier in process memory.
+On API restart, quarantine state is lost. In a multi-instance API
+deployment, each instance has its own state.
+
+**Operational impact:** An agent escalated to a quarantine tier loses
+its tier on the next API restart or on a different instance.
+
+**Mitigation today:** Single-instance deployments only; restart cadence
+documented in incident runbook.
+
+**Planned fix:** Redis-backed persistence with reconciliation on load.
+Tracking issue: TBD.
+
+### Runner-environment hardening flags are opt-in
+
+Location: `services/runner/app/runner.py` (lines 1175, 1214, 1264)
+
+The runner's Linux-namespace, capability, and mount-invariant checks
+default to disabled (`M87_NETWORK_CHECK_ENABLED`, `M87_CAP_CHECK_ENABLED`,
+`M87_MOUNT_CHECK_ENABLED` default to "0"). The runner emits a warning
+line on each disabled check at startup.
+
+**Operational impact:** Runner starts and operates without verifying
+its environment-level isolation guarantees unless flags are explicitly
+set. The governance Phase 3-6 enforcement (API-side) is independent
+and on by default.
+
+**Mitigation:** Production deployments must set these flags to "1".
+See `.env.example` for the documented surface.
+
+**Note on architecture:** These flags are not configurable security
+overrides in the meta-constraints sense — they are environment-fitness
+checks that fail-closed when enabled but assume environment fitness
+when disabled. The semantic asymmetry is intentional for dev/CI
+parity. Production operators should always enable them.
+
+### Shadow eval state is in-memory with placeholder hashes
+
+Location: `apps/api/app/main.py:734`
+
+Shadow evaluation tracking (`_shadow_eval_state`) is in-memory. The
+default `ShadowEvalConfig` uses placeholder zero-hashes for eval suite,
+prompt family, and scoring function.
+
+**Operational impact:** Shadow eval is not currently load-bearing for
+production decision-making. The endpoints exist for forward compatibility
+but are not yet driving enforcement.
+
+**Planned fix:** Postgres-backed state + non-placeholder hashes loaded
+from a signed manifest.
