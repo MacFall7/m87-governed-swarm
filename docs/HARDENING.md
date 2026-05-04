@@ -513,7 +513,7 @@ and on by default.
 See `.env.example` for the documented surface.
 
 **Note on architecture:** These flags are not configurable security
-overrides in the meta-constraints sense — they are environment-fitness
+overrides in the meta-constraints sense. They are environment-fitness
 checks that fail-closed when enabled but assume environment fitness
 when disabled. The semantic asymmetry is intentional for dev/CI
 parity. Production operators should always enable them.
