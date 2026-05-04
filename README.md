@@ -157,8 +157,8 @@ These are **anti-features**—capabilities deliberately excluded from M87:
 
 ```bash
 # Clone
-git clone https://github.com/MacFall7/MacFall7-m87-governed-swarm.git
-cd MacFall7-m87-governed-swarm
+git clone https://github.com/MacFall7/m87-governed-swarm.git
+cd m87-governed-swarm
 
 # Configure
 cp .env.example .env
