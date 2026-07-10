@@ -1,6 +1,6 @@
 # M87 Governed Swarm
 
-[![CI](https://github.com/MacFall7/MacFall7-m87-governed-swarm/actions/workflows/ci.yml/badge.svg)](https://github.com/MacFall7/MacFall7-m87-governed-swarm/actions/workflows/ci.yml)
+[![CI](https://github.com/MacFall7/m87-governed-swarm/actions/workflows/ci.yml/badge.svg)](https://github.com/MacFall7/m87-governed-swarm/actions/workflows/ci.yml)
 
 A policy-gated autonomous execution substrate. Agents propose, governance decides, runners execute.
 
