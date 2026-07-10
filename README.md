@@ -37,7 +37,7 @@ This repo implements a fail-closed governance perimeter for all executable agent
 - **Artifact-backed completion**: Runner must not report "completed" without verifiable artifacts
 - **Machine-verifiable receipts**: Results include `deh_evidence` (claimed vs recomputed hash + verified flag)
 
-**All enforcement happens in the Runner—the only component authorized to execute tools—so policy can't be bypassed by upstream orchestration.**
+**All enforcement happens in the Runner—the only component authorized to execute tools—so upstream orchestration has no supported path to bypass policy.**
 
 ### API Governance (Phase 3-6)
 
@@ -60,7 +60,7 @@ The API enforces additional governance before jobs are even minted:
 
 **Both `/v1` and `/v2` governance endpoints flow through the same Phase 3-6 enforcement lane.**
 
-No execution path can enqueue jobs without passing Phase 3-6 governance.
+No supported execution path enqueues jobs without passing Phase 3-6 governance.
 
 ### UI Governance Observability Layer
 
@@ -134,7 +134,7 @@ M87 is designed so that **ambiguity resolves to denial**, not permission.
 | Tool not in manifest | DENY (Runner rejects) |
 | Sensor blindness (Phase 3) | DENY for exfil-adjacent effects |
 
-**Why this matters**: In security-critical systems, "fail-open" creates exploitable gaps. M87 never assumes permission—it requires explicit proof of authorization at every layer.
+**Why this matters**: In security-critical systems, "fail-open" creates exploitable gaps. M87 is designed to never assume permission by default—it requires explicit proof of authorization at every layer it currently implements.
 
 ## What This System Will Not Do
 
@@ -151,7 +151,7 @@ These are **anti-features**—capabilities deliberately excluded from M87:
 | Fallback to permissive defaults | Unknown state = rejection, not assumption |
 | Skip artifact verification | Completion requires machine-verifiable proof |
 
-**This is not a limitation—it's the product**. M87 exists to make these behaviors impossible by construction.
+**This is not a limitation—it's the product**. M87 exists to make these behaviors impossible within its currently implemented execution paths, by construction.
 
 ## Quick Start
 
