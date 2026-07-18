@@ -6,7 +6,13 @@ confused deputy patterns, and sensor blindness scenarios.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# The governance route now fails closed on an insecure challenge secret.
+# Configure a real (non-default) secret for the whole test module.
+os.environ.setdefault("M87_CHALLENGE_SECRET", "test-secret-not-the-default")
 
 from app.session_risk import SessionRiskTracker
 from app.governance.effects import EffectTag, parse_effects
@@ -49,11 +55,22 @@ class FakeRedis:
         if key in self.data:
             del self.data[key]
 
+    def setex(self, key, ttl, value):
+        if self._should_fail:
+            raise ConnectionError("Redis unavailable")
+        self.data[key] = value
+
+    def get(self, key):
+        if self._should_fail:
+            raise ConnectionError("Redis unavailable")
+        return self.data.get(key)
+
 
 class FakePipeline:
     def __init__(self, redis_instance):
         self.redis = redis_instance
         self.ops = []
+        self._results = []
 
     def zadd(self, key, mapping):
         for k in mapping.keys():
@@ -63,8 +80,17 @@ class FakePipeline:
     def expire(self, key, ttl):
         return self
 
+    def get(self, key):
+        self._results.append(self.redis.data.get(key))
+        return self
+
+    def delete(self, key):
+        self.redis.data.pop(key, None)
+        self._results.append(1)
+        return self
+
     def execute(self):
-        return True
+        return self._results if self._results else True
 
 
 # ---- Session Risk Tests ----
@@ -372,3 +398,78 @@ class TestBypassPrevention:
         # Should escalate due to tripwire flags
         assert result["decision"] == "REQUIRE_HUMAN"
         assert "Tripwire flags" in result["reason"]
+
+
+# ---- Phase 6 override hardening (estate audit 2026-07-17 P0) ----
+
+class TestOverrideChallengeHardening:
+    """The human-override challenge must not be answerable by an automated
+    client reading the API response, must be single-use, and must fail closed
+    on an insecure secret."""
+
+    def _escalate(self, r):
+        from app.routes.govern_proposal import evaluate_governance_proposal
+        evaluate_governance_proposal(
+            {"principal_id": "p1", "agent_name": "a1", "effects": ["READ_REPO"], "artifacts": []}, r)
+        return evaluate_governance_proposal(
+            {"principal_id": "p1", "agent_name": "a1", "effects": ["NETWORK_CALL"],
+             "artifacts": [], "_proposal_json": '{"n":1}'}, r)
+
+    def test_challenge_answer_not_disclosed_in_response(self):
+        import json
+        r = FakeRedis()
+        res = self._escalate(r)
+        assert res["decision"] in ("REQUIRE_HUMAN", "DENY")
+        # The exact toxic-topology name is the challenge answer; it must not
+        # appear anywhere in the client-facing response body.
+        assert "repo_read_then_network" not in json.dumps(res)
+        assert "Toxic topology" in res["reason"]  # marker preserved
+
+    def test_human_with_console_name_can_approve(self):
+        from app.routes.govern_proposal import approve_governance_override
+        r = FakeRedis()
+        res = self._escalate(r)
+        cid = res["challenge"]["challenge_id"]
+        out = approve_governance_override(
+            {"principal_id": "p1", "agent_name": "a1", "effects": ["NETWORK_CALL"],
+             "answer": "repo_read_then_network", "challenge_id": cid,
+             "proposal": {}, "_proposal_json": '{"n":1}'}, r)
+        assert out["decision"] == "ALLOW"
+
+    def test_challenge_is_single_use(self):
+        from app.routes.govern_proposal import approve_governance_override
+        from fastapi import HTTPException
+        r = FakeRedis()
+        res = self._escalate(r)
+        cid = res["challenge"]["challenge_id"]
+        args = {"principal_id": "p1", "agent_name": "a1", "effects": ["NETWORK_CALL"],
+                "answer": "repo_read_then_network", "challenge_id": cid,
+                "proposal": {}, "_proposal_json": '{"n":1}'}
+        approve_governance_override(dict(args), r)  # first use ok
+        with pytest.raises(HTTPException):            # replay blocked
+            approve_governance_override(dict(args), r)
+
+    def test_unknown_challenge_fails_closed(self):
+        from app.routes.govern_proposal import approve_governance_override
+        from fastapi import HTTPException
+        r = FakeRedis()
+        with pytest.raises(HTTPException):
+            approve_governance_override(
+                {"principal_id": "p1", "agent_name": "a1", "effects": ["NETWORK_CALL"],
+                 "answer": "repo_read_then_network", "challenge_id": "not-a-real-id",
+                 "proposal": {}, "_proposal_json": '{"n":1}'}, r)
+
+    def test_insecure_secret_fails_closed(self, monkeypatch):
+        from app.governance.adversarial_review import (
+            require_secure_challenge_config, InsecureChallengeConfig)
+        monkeypatch.setenv("M87_CHALLENGE_SECRET", "dev-secret-change-me")
+        monkeypatch.delenv("M87_ALLOW_INSECURE_CHALLENGE", raising=False)
+        with pytest.raises(InsecureChallengeConfig):
+            require_secure_challenge_config()
+
+    def test_governance_auth_fails_closed_when_unconfigured(self, monkeypatch):
+        from app.routes.govern_proposal import require_governance_auth
+        from fastapi import HTTPException
+        monkeypatch.delenv("M87_GOVERNANCE_API_TOKEN", raising=False)
+        with pytest.raises(HTTPException):
+            require_governance_auth(authorization="Bearer anything")
