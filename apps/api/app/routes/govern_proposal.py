@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 import redis
@@ -33,6 +33,9 @@ from ..governance.adversarial_review import (
     stable_proposal_hash,
     generate_challenge,
     verify_challenge,
+    require_secure_challenge_config,
+    save_challenge,
+    consume_challenge,
     Challenge,
 )
 
@@ -77,6 +80,30 @@ class ApprovalRequest(BaseModel):
     proposal: Dict[str, Any]
     challenge_id: str
     answer: str
+
+
+# ---- Fail-closed authentication for override endpoints ----
+
+def require_governance_auth(authorization: str = Header(default="")) -> None:
+    """Fail-closed bearer check on the governance override surface.
+
+    The proposal and approve endpoints mutate session-risk state and clear
+    human-override gates; they must not be anonymous. The expected token is
+    read from M87_GOVERNANCE_API_TOKEN. If that is unset the endpoint refuses
+    all calls (503) rather than defaulting open — no token, no access.
+    """
+    import os
+    expected = os.environ.get("M87_GOVERNANCE_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="Governance auth not configured (M87_GOVERNANCE_API_TOKEN unset).",
+        )
+    prefix = "Bearer "
+    presented = authorization[len(prefix):] if authorization.startswith(prefix) else ""
+    import hmac as _hmac
+    if not presented or not _hmac.compare_digest(presented, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing bearer token.")
 
 
 # ---- Dependencies ----
@@ -149,6 +176,9 @@ def evaluate_governance_proposal(payload: Dict[str, Any], r: redis.Redis) -> Dic
 
     # Phase 6: Challenge-response for REQUIRE_HUMAN
     if decision == "REQUIRE_HUMAN":
+        # Refuse to issue an override challenge under an insecure HMAC secret.
+        require_secure_challenge_config()
+
         topology_name = "unknown_topology"
         if "Toxic topology detected:" in reason:
             try:
@@ -157,9 +187,23 @@ def evaluate_governance_proposal(payload: Dict[str, Any], r: redis.Redis) -> Dic
                 pass
 
         challenge = generate_challenge(p_hash, topology_name)
+        # Persist the expected answer server-side (single-use, TTL). The client
+        # never receives it — that closes the bot-defeat where an automated
+        # caller echoed the topology name back out of the response body.
+        save_challenge(r, challenge)
+
+        # Redact the specific topology name from the CLIENT-facing reason so the
+        # response no longer discloses the challenge answer. The "Toxic topology"
+        # marker is preserved; the exact name is shown only in the operator UI /
+        # server logs, which is where a human obtains it to answer the challenge.
+        client_reason = reason.replace(
+            f"Toxic topology detected: {topology_name}",
+            "Toxic topology detected (name shown in the operator console)",
+        )
+
         return {
             "decision": decision,
-            "reason": reason,
+            "reason": client_reason,
             "proposal_hash": p_hash,
             "challenge": {
                 "challenge_id": challenge.challenge_id,
@@ -190,36 +234,34 @@ def approve_governance_override(payload: Dict[str, Any], r: redis.Redis) -> Dict
     Can be called from /v1 or /v2 endpoints.
     Verifies challenge-response and commits effects on success.
     """
+    require_secure_challenge_config()
+
     principal_id = payload.get("principal_id") or "unknown"
     agent_name = payload.get("agent_name") or payload.get("agent") or "unknown"
     effects = payload.get("effects") or []
     answer = payload.get("answer") or ""
     challenge_id = payload.get("challenge_id") or ""
 
-    # Get proposal JSON for hash binding
-    proposal_json = payload.get("_proposal_json")
-    if not isinstance(proposal_json, str):
-        proposal_json = json.dumps(payload.get("proposal") or {}, sort_keys=True, default=str)
-    p_hash = stable_proposal_hash(proposal_json)
+    # Load the pending challenge from server-side store (single-use). The
+    # expected answer and proposal-hash binding come from here, NOT from the
+    # client-supplied proposal — so a caller cannot derive or replay the answer.
+    # Unknown / consumed / expired challenge all fail closed.
+    stored = consume_challenge(r, challenge_id)
+    if not stored:
+        raise HTTPException(
+            status_code=403,
+            detail="Approval blocked: challenge unknown, already used, or expired",
+        )
 
-    # Extract topology from proposal reason if present
-    topology_name = "unknown_topology"
-    proposal = payload.get("proposal") or {}
-    if "Toxic topology" in str(proposal.get("reason", "")):
-        try:
-            topology_name = str(proposal["reason"]).split("Toxic topology detected:")[1].strip().split()[0]
-        except Exception:
-            pass
-
-    # Recreate challenge for verification
     ch = Challenge(
         challenge_id=challenge_id,
         prompt="",
-        expected=topology_name,
-        proposal_hash=p_hash,
+        expected=stored.get("expected", ""),
+        proposal_hash=stored.get("proposal_hash", ""),
     )
+    p_hash = ch.proposal_hash
 
-    # Verify the challenge
+    # Verify the challenge (answer match + HMAC binding to the original proposal)
     result = verify_challenge(ch, answer)
     if result.get("ok") != "true":
         raise HTTPException(
@@ -245,7 +287,8 @@ def approve_governance_override(payload: Dict[str, Any], r: redis.Redis) -> Dict
 @router.post("/proposal", response_model=GovernanceResponse)
 def govern_proposal(
     payload: ProposalRequest,
-    r: redis.Redis = Depends(get_redis)
+    r: redis.Redis = Depends(get_redis),
+    _auth: None = Depends(require_governance_auth),
 ) -> GovernanceResponse:
     """
     Main governance choke point (v2).
@@ -277,7 +320,8 @@ def govern_proposal(
 @router.post("/approve", response_model=GovernanceResponse)
 def approve_override(
     payload: ApprovalRequest,
-    r: redis.Redis = Depends(get_redis)
+    r: redis.Redis = Depends(get_redis),
+    _auth: None = Depends(require_governance_auth),
 ) -> GovernanceResponse:
     """
     Human override approval with challenge-response verification (v2).
